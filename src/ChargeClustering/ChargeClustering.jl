@@ -7,9 +7,12 @@
 function cluster_detector_hits(
     detno::AbstractVector{<:Integer},
     edep::AbstractVector{TT},
-    pos::AbstractVector{<:StaticVector{3,PT}},
+    pos::AbstractVector{<:CartesianPoint{PT}},
     cluster_radius::RealQuantity
 ) where {TT<:RealQuantity, PT <: RealQuantity}
+
+    pos = isa(first(pos), CartesianPoint) ? [SVector(p.x, p.y, p.z) for p in pos] : pos     #converting CartesianPoint to SVector
+
     Table = TypedTables.Table
     unsorted = Table(detno = detno, edep = edep, pos = pos)
     sorting_idxs = sortperm(unsorted.detno)
