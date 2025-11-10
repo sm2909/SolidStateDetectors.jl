@@ -66,6 +66,23 @@ end
     @test evts isa Table
     @test length(evts) == 100
 
+    # Cluster events by time and radius
+    clustered_evts = @test_nowarn SolidStateDetectors.cluster_detector_hits(evts, 10u"µm", 100u"s")
+    @test length(clustered_evts) == length(evts)
+    @test length(flatview(clustered_evts.pos)) ≤ length(flatview(evts.pos))
+
+    @test all(isa.(flatview(clustered_evts.pos), CartesianPoint{<:Real}))   #checking type consistency for pos
+    @test isapprox(sum(flatview(clustered_evts.edep)), sum(flatview(evts.edep)); rtol=1e-6)   #checking energy conservation after clustering
+    
+    #sanity check that all values in the table are not NaN
+    pos = flatview(clustered_evts.pos)
+    @test all(!isnan.(ustrip.([p.x for p in pos]))) &&
+        all(!isnan.(ustrip.([p.y for p in pos]))) &&
+        all(!isnan.(ustrip.([p.z for p in pos])))
+
+    @test all(!isnan.(ustrip.(flatview(clustered_evts.thit))))
+    @test all(!isnan.(ustrip.(flatview(clustered_evts.edep))))
+
     # Generate waveforms
     simulate!(sim, refinement_limits = [0.2,0.1,0.05,0.03,0.02])
     wf = simulate_waveforms(evts, sim, Δt = 1u"ns", max_nsteps = 2000)

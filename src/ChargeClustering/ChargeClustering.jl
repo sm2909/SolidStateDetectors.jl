@@ -2,19 +2,25 @@
 
 # breaking changes in Clustering v0.14 -> v0.15
 @inline _get_clusters(clusters::Clustering.DbscanResult) = clusters.clusters
-@inline _get_clusters(clusters::Vector{Clustering.DbscanCluster}) = clusters
+
+@inline function finalize_group!(time_groups, current_group, new_index)
+    push!(time_groups, current_group)
+    return [new_index]
+end
 
 function cluster_detector_hits(
     detno::AbstractVector{<:Integer},
     edep::AbstractVector{TT},
-    pos::AbstractVector{<:CartesianPoint{PT}},
-    cluster_radius::RealQuantity
-) where {TT<:RealQuantity, PT <: RealQuantity}
+    pos::AbstractVector{CartesianPoint{PT}},
+    thit::AbstractVector{TTT},
+    cluster_radius::RealQuantity,
+    cluster_time::RealQuantity
+) where {TT<:RealQuantity, PT <: RealQuantity, TTT <: RealQuantity}
 
-    pos = isa(first(pos), CartesianPoint) ? [SVector(p.x, p.y, p.z) for p in pos] : pos     #converting CartesianPoint to SVector
+    pos = [SVector(p.x, p.y, p.z) for p in pos]   # converting CartesianPoint to SVector
 
     Table = TypedTables.Table
-    unsorted = Table(detno = detno, edep = edep, pos = pos)
+    unsorted = Table(detno = detno, edep = edep, pos = pos, thit = thit)
     sorting_idxs = sortperm(unsorted.detno)
     sorted = unsorted[sorting_idxs]
     grouped = Table(consgroupedview(sorted.detno, TypedTables.columns(sorted)))
@@ -22,49 +28,95 @@ function cluster_detector_hits(
     r_detno = similar(detno, 0)
     r_edep = similar(edep, 0)
     r_pos = similar(pos, 0)
+    r_thit = similar(thit, 0)
 
     posunit = unit(PT)
     ustripped_cradius = ustrip(posunit, cluster_radius)
-    
+
+    thitunit = unit(TTT)
+    ustripped_ctime = ustrip(thitunit, cluster_time)
+
     for d_hits_nt in grouped
         d_hits = Table(d_hits_nt)
         d_detno = first(d_hits.detno)
         @assert all(isequal(d_detno), d_hits.detno)
-        if length(d_hits) > 3
-            clusters = Clustering.dbscan(ustrip.(flatview(d_hits.pos)), ustripped_cradius, leafsize = 20, min_neighbors = 1, min_cluster_size = 1)
-            for c in _get_clusters(clusters)
-                idxs = vcat(c.boundary_indices, c.core_indices)
-                @assert length(idxs) == c.size
-                c_hits = view(d_hits, idxs)
-                
-                push!(r_detno, d_detno)
-                esum_u = sum(c_hits.edep)
-                push!(r_edep, esum_u)
-                esum = ustrip(esum_u)
-                if esum ≈ 0
-                    push!(r_pos, mean(c_hits.pos))
-                else
-                    weights = ustrip.(c_hits.edep) .* inv(esum)
-                    push!(r_pos, sum(c_hits.pos .* weights))
-                end
+
+        # sort hits by time
+        t_sort_idx = sortperm(d_hits.thit)
+        d_hits = d_hits[t_sort_idx]
+        t_vals = ustrip.(d_hits.thit)
+
+        time_groups = Vector{Vector{Int}}()
+        current_group = [1]
+        start_time = t_vals[1]
+        for i in 2:length(t_vals)
+            if t_vals[i] - start_time ≤ ustripped_ctime
+                push!(current_group, i)
+            else
+                current_group = finalize_group!(time_groups, current_group, i)
+                start_time = t_vals[i]
             end
-        else
-            append!(r_detno, d_hits.detno)
-            append!(r_edep, d_hits.edep)
-            append!(r_pos, d_hits.pos)
+        end
+        current_group = finalize_group!(time_groups, current_group, nothing)
+
+
+        # spatial clustering within each temporal cluster
+        for tg in time_groups
+            t_hits = view(d_hits, tg)
+            if length(t_hits) > 3
+                clusters = Clustering.dbscan(ustrip.(flatview(t_hits.pos)), ustripped_cradius;
+                                              leafsize = 20, min_neighbors = 1, min_cluster_size = 1)
+                for c in _get_clusters(clusters)
+                    idxs = vcat(c.boundary_indices, c.core_indices)
+                    @assert length(idxs) == c.size
+                    c_hits = view(t_hits, idxs)
+
+                    push!(r_detno, d_detno)
+                    esum_u = sum(c_hits.edep)
+                    push!(r_edep, esum_u)
+                    esum = ustrip(esum_u)
+                    if esum ≈ 0
+                        push!(r_pos, mean(c_hits.pos))
+                        push!(r_thit, mean(c_hits.thit))
+                    else
+                        weights = ustrip.(c_hits.edep) .* inv(esum)
+                        push!(r_pos, sum(c_hits.pos .* weights))
+                        push!(r_thit, sum(c_hits.thit .* weights))
+                    end
+                end
+            else
+                append!(r_detno, t_hits.detno)
+                append!(r_edep, t_hits.edep)
+                append!(r_pos, t_hits.pos)
+                append!(r_thit, t_hits.thit)
+            end
         end
     end
 
-    (detno = r_detno, edep = r_edep, pos = r_pos)
+    r_pos = [CartesianPoint(p[1], p[2], p[3]) for p in r_pos]   #converting SVector back to CartesianPoint
+
+    (detno = r_detno, edep = r_edep, pos = r_pos, thit = r_thit)
 end
 
 
-function cluster_detector_hits(table::TypedTables.Table, cluster_radius::RealQuantity)
+function cluster_detector_hits(
+    table::TypedTables.Table, 
+    cluster_radius::PT, 
+    cluster_time::TTT
+) where {PT <: RealQuantity, TTT <: RealQuantity}
     @assert :pos in TypedTables.columnnames(table) "Table has no column `pos`"
+    @assert :thit in TypedTables.columnnames(table) "Table has no column `thit`"
     @assert :edep in TypedTables.columnnames(table) "Table has no column `edep`"
     @assert :detno in TypedTables.columnnames(table) "Table has no column `detno`"
     clustered_nt = map(
-        evt -> cluster_detector_hits(evt.detno, evt.edep, evt.pos, cluster_radius),
+        evt -> cluster_detector_hits(
+            evt.detno,
+            evt.edep,
+            [p isa CartesianPoint ? p : CartesianPoint(p...) for p in evt.pos],
+            evt.thit,
+            cluster_radius,
+            cluster_time
+        ),
         table
     )
     TypedTables.Table(merge(
